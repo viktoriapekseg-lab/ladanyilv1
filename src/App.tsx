@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { envOk, loadAll, addPartner, deletePartner, addCrateType, setCrateTypeArchived, deleteCrateType, addMovement, deleteMovement, type Partner as P, type CrateType as C, type Movement as M } from './lib/db';
+import { envOk, loadAll, addPartner, deletePartner, addCrateType, setCrateTypeArchived, deleteCrateType, addMovement, deleteMovement, updatePartner, type Partner as P, type CrateType as C, type Movement as M } from './lib/db';
 
 type UserRole = 'admin' | 'driver';
 type User = { name: string; role: UserRole };
@@ -20,7 +20,13 @@ function csvEscape(v:any){ return '"' + String(v ?? '').replace(/"/g,'""') + '"'
 function toCSV(rows: Record<string,string|number>[]) { if(!rows.length) return ''; const headers = Object.keys(rows[0]); return [headers.map(csvEscape).join(','), ...rows.map(r=> headers.map(h=> csvEscape(r[h])).join(',')).join('\n')].join('\n'); }
 function formatCrateTypeLabel(map:Record<string,CrateType>, id:string){ return map[id]?.label ?? `${id} (törölt)`; }
 function computeBalances(movements:Movement[]){ const map=new Map<string,number>(); for(const m of movements){ const key=`${m.partner_id}|${m.crate_type_id}`; const sign=m.direction==='out'?1:-1; const prev=map.get(key)||0; const next=prev+sign*(Number.isFinite(m.qty as number)? (m.qty as number):0); map.set(key,next);} return map; }
-function movementMatchesFilters(m:{partner_id:string; crate_type_id:string}, fp:string, ft:string, pb:Record<string,Partner>, cb:Record<string,CrateType>){ const partnerOk = !fp || (pb[fp]? m.partner_id===fp : true); const typeOk = !ft || (cb[ft]? m.crate_type_id===ft : true); return partnerOk && typeOk; }
+function movementMatchesFilters(m:{partner_id:string; crate_type_id:string; date?: string}, fp:string, ft:string, from:string, to:string, pb:Record<string,Partner>, cb:Record<string,CrateType>){
+  const partnerOk = !fp || (pb[fp]? m.partner_id===fp : true);
+  const typeOk = !ft || (cb[ft]? m.crate_type_id===ft : true);
+  const fromOk = !from || (m.date ?? '') >= from;
+  const toOk = !to || (m.date ?? '') <= to;
+  return partnerOk && typeOk && fromOk && toOk;
+}
 
 export default function App(){
   const [user, setUser] = useState<User|null>(null);
@@ -48,7 +54,7 @@ export default function App(){
               </div>
               <div className="flex gap-2 flex-col sm:flex-row">
                 <button className="btn btn-secondary" onClick={()=> exportCSV(partners, crateTypes, movements)}>Export</button>
-                <button className="btn btn-secondary" onClick={()=> setUser(null)}>Kijelentkezés</button>
+                <button className="btn btn-danger" onClick={()=> setUser(null)}>Kijelentkezés</button>
               </div>
             </header>
 
@@ -84,19 +90,30 @@ function Login({ onLogin }: { onLogin: (u: User)=> void }){
   const [err, setErr] = useState<string|null>(null);
   const submit = ()=> { const u = validatePin(pin.trim()); if(!u){ setErr('Hibás PIN.'); return; } onLogin(u); };
   return <div className="min-h-[60vh] grid place-items-center">
-    <div className="card" style={{maxWidth:480,width:'100%'}}>
+    <form className="card" style={{maxWidth:480,width:'100%'}} onSubmit={(e)=>{ e.preventDefault(); submit(); }}>
       <div className="card-header"><div className="card-title">Belépés PIN-kóddal</div></div>
       <div className="card-content grid gap-3">
         <div>
           <label className="label">PIN</label>
-          <input className="input" type="password" value={pin} onChange={e=> setPin(e.target.value)} placeholder="PIN megadása"/>
+          <input
+            className="input"
+            type="tel"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            autoComplete="one-time-code"
+            name="pin"
+            value={pin}
+            onChange={e=> setPin(e.target.value.replace(/\D/g,''))}
+            placeholder="PIN megadása"
+            onKeyDown={(e)=>{ if(e.key==='Enter') submit(); }}
+          />
         </div>
         {err && <div style={{color:'#dc2626', fontSize:12}}>{err}</div>}
         <div className="flex justify-end">
-          <button className="btn w-full sm:w-auto" onClick={submit}>Belépés</button>
+          <button type="submit" className="btn btn-tiffany w-full sm:w-auto">Belépés</button>
         </div>
       </div>
-    </div>
+    </form>
   </div>;
 }
 
@@ -174,7 +191,7 @@ function MovementEntry({ user, partners, crateTypes, onAdd }:{ user: User; partn
         <textarea className="textarea" rows={3} value={note} onChange={e=> setNote(e.target.value)} placeholder="pl. bizonylatszám"/>
       </div>
       <div className="md:col-span-6 flex justify-end">
-        <button className="btn w-full md:w-auto" onClick={async ()=>{
+        <button className="btn btn-invert w-full md:w-auto" onClick={async ()=>{
           if(!partnerId) return alert('Válassz partnert!'); 
           if(!crateTypeId) return alert('Válassz ládatípust!');
           const v = parseInt(qty,10); 
@@ -190,7 +207,16 @@ function MovementEntry({ user, partners, crateTypes, onAdd }:{ user: User; partn
 function MovementTable({ user, movements, partnersById, crateTypesById, onDelete }:{ user:User; movements:Movement[]; partnersById:Record<string,Partner>; crateTypesById:Record<string,CrateType>; onDelete:(id:string)=> void | Promise<void> }){
   const [filterPartner, setFilterPartner] = useState<string>('');
   const [filterType, setFilterType] = useState<string>('');
-  const filtered = useMemo(()=> movements.filter(m=> movementMatchesFilters(m, filterPartner, filterType, partnersById, crateTypesById)), [movements, filterPartner, filterType, partnersById, crateTypesById]);
+  const [fromDate, setFromDate] = useState<string>('');
+  const [toDate, setToDate] = useState<string>('');
+  const [showCount, setShowCount] = useState<number>(10);
+
+  const filtered = useMemo(()=> movements.filter(m=> movementMatchesFilters(m, filterPartner, filterType, fromDate, toDate, partnersById, crateTypesById)), [movements, filterPartner, filterType, fromDate, toDate, partnersById, crateTypesById]);
+  const visible = filtered.slice(0, showCount);
+
+  // reset paging when filters change
+  useEffect(()=>{ setShowCount(10); }, [filterPartner, filterType, fromDate, toDate]);
+
   return <div className="card">
     <div className="card-header flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
       <div className="card-title">Rögzített mozgások</div>
@@ -203,7 +229,9 @@ function MovementTable({ user, movements, partnersById, crateTypesById, onDelete
           <option value={SELECT_ALL}>(Összes típus)</option>
           {Object.values(crateTypesById).map(c=> <option key={c.id} value={c.id}>{c.label}{c.archived? ' (archív)': ''}</option>)}
         </select>
-        {(filterPartner||filterType) && <button className="btn btn-secondary" onClick={()=>{ setFilterPartner(''); setFilterType(''); }}>Szűrők törlése</button>}
+        <input className="input" type="date" value={fromDate} onChange={e=> setFromDate(e.target.value)} placeholder="Dátumtól"/>
+        <input className="input" type="date" value={toDate} onChange={e=> setToDate(e.target.value)} placeholder="Dátumig"/>
+        {(filterPartner||filterType||fromDate||toDate) && <button className="btn btn-secondary" onClick={()=>{ setFilterPartner(''); setFilterType(''); setFromDate(''); setToDate(''); }}>Szűrők törlése</button>}
       </div>
     </div>
     <div className="card-content">
@@ -222,7 +250,7 @@ function MovementTable({ user, movements, partnersById, crateTypesById, onDelete
             </tr>
           </thead>
           <tbody>
-            {filtered.map(m=> (
+            {visible.map(m=> (
               <tr key={m.id}>
                 <td>{m.date}</td>
                 <td className="hidden sm:table-cell">{m.driver_name||'–'}</td>
@@ -234,51 +262,98 @@ function MovementTable({ user, movements, partnersById, crateTypesById, onDelete
                 <td style={{textAlign:'right'}}>{user.role==='admin' && <button className="btn" onClick={()=> onDelete(m.id)}>Törlés</button>}</td>
               </tr>
             ))}
-            {filtered.length===0 && <tr><td colSpan={8} style={{textAlign:'center',color:'#6b7280',fontSize:13}}>Még nincs adat.</td></tr>}
+            {visible.length===0 && <tr><td colSpan={8} style={{textAlign:'center',color:'#6b7280',fontSize:13}}>Nincs találat.</td></tr>}
           </tbody>
         </table>
       </div>
+      {showCount < filtered.length && (
+        <div className="flex justify-center mt-3">
+          <button className="btn" onClick={()=> setShowCount(s=> Math.min(s+20, filtered.length))}>Tovább</button>
+        </div>
+      )}
     </div>
   </div>;
 }
 
 function PartnersCard({ partners, setPartners }:{ partners: Partner[]; setPartners: React.Dispatch<React.SetStateAction<Partner[]>> }){
-  const [open, setOpen] = useState(false);
+  const [openNew, setOpenNew] = useState(false);
   const [name, setName] = useState('');
   const [contact, setContact] = useState('');
   const [note, setNote] = useState('');
+
+  const [editId, setEditId] = useState<string|null>(null);
+  const [editName, setEditName] = useState('');
+  const [editContact, setEditContact] = useState('');
+  const [editNote, setEditNote] = useState('');
+
+  const startEdit = (p: Partner)=>{ setEditId(p.id); setEditName(p.name); setEditContact(p.contact||''); setEditNote(p.note||''); };
+  const saveEdit = async ()=>{
+    if(!editId) return;
+    if(!editName.trim()) return alert('A partner neve kötelező.');
+    const r:any = await updatePartner(editId, { name: editName.trim(), contact: editContact.trim()||null, note: editNote.trim()||null } as any);
+    if(r.error){ alert(r.error.message); return; }
+    const updated = r.data ?? (r as any).data;
+    setPartners(s=> s.map(x=> x.id===editId ? updated : x));
+    setEditId(null);
+  };
+
   const add = async ()=>{
     if(!name.trim()) return alert('A partner neve kötelező.');
-    const r = await addPartner({ name: name.trim(), contact: contact.trim()||undefined, note: note.trim()||undefined } as any);
+    const r:any = await addPartner({ name: name.trim(), contact: contact.trim()||undefined, note: note.trim()||undefined } as any);
     if(r.error){ alert(r.error.message); return; }
-    setPartners(s=> [...s, r.data as any]); setOpen(false); setName(''); setContact(''); setNote('');
+    setPartners(s=> [...s, r.data as any]); setOpenNew(false); setName(''); setContact(''); setNote('');
   };
+
   const remove = async (id:string)=>{
     if(!confirm('Biztosan törlöd a partnert?')) return;
-    const r = await deletePartner(id); if(r.error){ alert(r.error.message); return; }
+    const r:any = await deletePartner(id); if(r.error){ alert(r.error.message); return; }
     setPartners(s=> s.filter(p=> p.id!==id));
   };
+
   return <div className="card">
     <div className="card-header flex items-center justify-between">
       <div className="card-title">Partnerek</div>
-      {!open && <button className="btn" onClick={()=> setOpen(true)}>Új partner</button>}
+      {!openNew && <button className="btn" onClick={()=> setOpenNew(true)}>Új partner</button>}
     </div>
+
     <div className="card-content">
-      {open && <div className="dialog-overlay"><div className="dialog-content">
+      {/* Új partner */}
+      {openNew && <div className="dialog-overlay"><div className="dialog-content">
         <div className="card-title" style={{marginBottom:8}}>Új partner</div>
         <div className="grid gap-3 grid-cols-1">
           <div><label className="label">Név *</label><input className="input" value={name} onChange={e=> setName(e.target.value)}/></div>
           <div><label className="label">Elérhetőség</label><input className="input" value={contact} onChange={e=> setContact(e.target.value)} placeholder="telefon / email"/></div>
           <div><label className="label">Megjegyzés</label><textarea className="textarea" rows={3} value={note} onChange={e=> setNote(e.target.value)}/></div>
         </div>
-        <div className="flex justify-end gap-2 mt-2"><button className="btn btn-secondary" onClick={()=> setOpen(false)}>Mégse</button><button className="btn" onClick={add}>Mentés</button></div>
+        <div className="flex justify-end gap-2 mt-2"><button className="btn btn-secondary" onClick={()=> setOpenNew(false)}>Mégse</button><button className="btn" onClick={add}>Mentés</button></div>
+      </div></div>}
+
+      {/* Szerkesztés */}
+      {editId && <div className="dialog-overlay"><div className="dialog-content">
+        <div className="card-title" style={{marginBottom:8}}>Partner szerkesztése</div>
+        <div className="grid gap-3 grid-cols-1">
+          <div><label className="label">Név *</label><input className="input" value={editName} onChange={e=> setEditName(e.target.value)}/></div>
+          <div><label className="label">Elérhetőség</label><input className="input" value={editContact} onChange={e=> setEditContact(e.target.value)}/></div>
+          <div><label className="label">Megjegyzés</label><textarea className="textarea" rows={3} value={editNote} onChange={e=> setEditNote(e.target.value)}/></div>
+        </div>
+        <div className="flex justify-end gap-2 mt-2"><button className="btn btn-secondary" onClick={()=> setEditId(null)}>Mégse</button><button className="btn" onClick={saveEdit}>Mentés</button></div>
       </div></div>}
 
       <div style={{overflow:'auto', marginTop:16}}>
         <table className="table">
           <thead><tr><th>Név</th><th className="hidden sm:table-cell">Elérhetőség</th><th className="hidden sm:table-cell">Megjegyzés</th><th style={{textAlign:'right'}}>Művelet</th></tr></thead>
           <tbody>
-            {partners.map(p=> <tr key={p.id}><td>{p.name}</td><td className="hidden sm:table-cell">{p.contact}</td><td className="hidden sm:table-cell" title={p.note} style={{maxWidth:380,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{p.note}</td><td style={{textAlign:'right'}}><button className="btn" onClick={()=> remove(p.id)}>Törlés</button></td></tr>)}
+            {partners.map(p=> (
+              <tr key={p.id}>
+                <td>{p.name}</td>
+                <td className="hidden sm:table-cell">{p.contact}</td>
+                <td className="hidden sm:table-cell" title={p.note} style={{maxWidth:380,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{p.note}</td>
+                <td style={{textAlign:'right'}}>
+                  <button className="btn" onClick={()=> startEdit(p)}>Szerkesztés</button>
+                  <button className="btn" onClick={()=> remove(p.id)}>Törlés</button>
+                </td>
+              </tr>
+            ))}
             {partners.length===0 && <tr><td colSpan={4} style={{textAlign:'center',color:'#6b7280',fontSize:13}}>Még nincs partner.</td></tr>}
           </tbody>
         </table>

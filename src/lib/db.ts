@@ -1,15 +1,3 @@
-
-// ==== DIAG START (átmeneti) ====
-try {
-  const hasUrl = !!import.meta.env.VITE_SUPABASE_URL;
-  const hasKey = !!import.meta.env.VITE_SUPABASE_ANON_KEY;
-  console.log('[DIAG] VITE vars -> URL:', hasUrl, 'KEY:', hasKey);
-  if (hasUrl) {
-    const u = String(import.meta.env.VITE_SUPABASE_URL);
-    console.log('[DIAG] URL preview:', u.slice(0, 20) + '...' + u.slice(-10));
-  }
-} catch (e) { console.warn('[DIAG] env check failed', e); }
-// ==== DIAG END ====
 import { createClient } from '@supabase/supabase-js';
 const url = import.meta.env.VITE_SUPABASE_URL;
 const key = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -38,3 +26,8 @@ export const setCrateTypeArchived = (id: string, archived: boolean) => supabase.
 export const deleteCrateType = (id: string) => supabase.from('crate_types').delete().eq('id', id);
 export const addMovement = (row: Omit<Movement,'id'|'created_at'>) => supabase.from('movements').insert(row).select('*').single();
 export const deleteMovement = (id: string) => supabase.from('movements').delete().eq('id', id);
+
+
+// --- added by patch ---
+export const updatePartner = (id: string, patch: any) =>
+  supabase.from('partners').update(patch).eq('id', id).select('*').single();
